@@ -1,18 +1,12 @@
 ﻿#include "Essential.h"
 
-#define INIT_WIDTH 3840
-#define INIT_HEIGHT 2160
-
-int width = INIT_WIDTH;
-int height = INIT_HEIGHT;
-
 GLuint tex = 0;
 cudaGraphicsResource_t cuda_tex_res = nullptr;
 uchar4* dev_ptr = nullptr;
 
-// --------------------------------------------
+// ------------------------------------------------
 // CUDA Error Checking
-// --------------------------------------------
+// ------------------------------------------------
 void checkCuda(cudaError_t err) {
     if (err != cudaSuccess) {
         std::cerr << "CUDA Error: " << cudaGetErrorString(err) << std::endl;
@@ -20,20 +14,100 @@ void checkCuda(cudaError_t err) {
     }
 }
 
-// --------------------------------------------
-// CUDA Kernel
-// --------------------------------------------
-__global__ void fillKernel(uchar4* ptr, int w, int h, unsigned char xOffset, unsigned char yOffset) {
+// ------------------------------------------------
+// SDF & Ray March CUDA Kernel
+// ------------------------------------------------
+__device__ float sdf_sphere(float3 p, float3 center, float radius) {
+    return length(p - center) - radius;
+}
+
+__device__ float sdf_plane(float3 p, float3 normal, float d) {
+    return dot(p, normal) + d;
+}
+
+__device__ float scene_sdf(float3 p) {
+    float d_sphere = sdf_sphere(p, make_float3(0.0f, 0.5f, 3.0f), 0.5f);
+    float d_plane = sdf_plane(p, make_float3(0.0f, 1.0f, 0.0f), 0.0f);
+    return fminf(d_sphere, d_plane);
+}
+
+__device__ float3 getNormal(float3 p) {
+    float eps = 0.001f;
+    return normalize(make_float3(
+        scene_sdf(p + make_float3(eps, 0, 0)) - scene_sdf(p - make_float3(eps, 0, 0)),
+        scene_sdf(p + make_float3(0, eps, 0)) - scene_sdf(p - make_float3(0, eps, 0)),
+        scene_sdf(p + make_float3(0, 0, eps)) - scene_sdf(p - make_float3(0, 0, eps))
+    ));
+}
+
+__device__ uchar4 shadePixel(float3 ro, float3 rd, float t) {
+    float3 color = make_float3(0.0f);
+
+    if (t > 0.0f) {
+        float3 p = ro + t * rd;
+        float3 n = getNormal(p);
+        float3 lightDir = normalize(make_float3(-0.5f, 1.0f, -0.5f));
+        float diff = fmaxf(dot(n, lightDir), 0.0f);
+
+        color = make_float3(0.4f, 0.6f, 1.0f) * diff;
+    }
+
+    return make_uchar4(color.x * 255, color.y * 255, color.z * 255, 255);
+}
+
+__device__ float ray_march(float3 ro, float3 rd, float max_dist = 20.0f, int max_steps = 128) {
+    float t = 0.0f;
+    for (int i = 0; i < max_steps; ++i) {
+        float3 p = ro + t * rd;
+        float dist = scene_sdf(p);
+        if (dist < 0.001f) return t;
+        t += dist;
+        if (t > max_dist) break;
+    }
+    return -1.0f;
+}
+
+__global__ void sdfRaymarchKernel(uchar4* output, int w, int h) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= w || y >= h) return;
+
     int idx = y * w + x;
-    ptr[idx] = make_uchar4((x + xOffset) % 256, (y + yOffset) % 256, 128, 255);
+
+    float u = (float)x / (float)w * 2.0f - 1.0f;
+    float v = (float)y / (float)h * 2.0f - 1.0f;
+
+    float3 ro = make_float3(0.0f, 1.0f, -3.0f);
+    float3 rd = normalize(make_float3(u, -v, 1.5f));
+
+    float t = ray_march(ro, rd);
+    output[idx] = shadePixel(ro, rd, t);
 }
 
-// --------------------------------------------
+// ------------------------------------------------
+// CUDA Texture Fill
+// ------------------------------------------------
+void fillTextureWithCUDA() {
+    if (!cuda_tex_res || !dev_ptr) return;
+
+    cudaArray_t array;
+    checkCuda(cudaGraphicsMapResources(1, &cuda_tex_res));
+    checkCuda(cudaGraphicsSubResourceGetMappedArray(&array, cuda_tex_res, 0, 0));
+
+    dim3 block(16, 16);
+    dim3 grid((O1.states.textureWidth + 15) / 16, (O1.states.textureHeight + 15) / 16);
+    sdfRaymarchKernel << <grid, block >> > (dev_ptr, O1.states.textureWidth, O1.states.textureHeight);
+    checkCuda(cudaGetLastError());
+    checkCuda(cudaDeviceSynchronize());
+
+    checkCuda(cudaMemcpy2DToArray(array, 0, 0, dev_ptr, O1.states.textureWidth * sizeof(uchar4),
+        O1.states.textureWidth * sizeof(uchar4), O1.states.textureHeight, cudaMemcpyDeviceToDevice));
+    checkCuda(cudaGraphicsUnmapResources(1, &cuda_tex_res));
+}
+
+// ------------------------------------------------
 // Resize Resources
-// --------------------------------------------
+// ------------------------------------------------
 void resizeResources(int newWidth, int newHeight) {
     if (cuda_tex_res) {
         checkCuda(cudaGraphicsUnregisterResource(cuda_tex_res));
@@ -58,39 +132,21 @@ void resizeResources(int newWidth, int newHeight) {
     checkCuda(cudaMalloc(&dev_ptr, newWidth * newHeight * sizeof(uchar4)));
 }
 
-// --------------------------------------------
+// ------------------------------------------------
 // GLFW Resize Callback
-// --------------------------------------------
-void framebuffer_size_callback(GLFWwindow*, int newWidth, int newHeight) {
+// ------------------------------------------------
+void framebuffer_size_callback(GLFWwindow* w, int newWidth, int newHeight) {
     glViewport(0, 0, newWidth, newHeight);
-    width = newWidth;
-    height = newHeight;
-    resizeResources(width, height);
+    O1.states.windowWidth = newWidth;
+    O1.states.windowHeight = newHeight;
+    O1.states.textureWidth = newWidth;
+    O1.states.textureHeight = newHeight;
+    resizeResources(newWidth, newHeight);
 }
 
-// --------------------------------------------
-// CUDA Texture Fill
-// --------------------------------------------
-void fillTextureWithCUDA(unsigned char xOffset, unsigned char yOffset) {
-    if (!cuda_tex_res || !dev_ptr) return;
-
-    cudaArray_t array;
-    checkCuda(cudaGraphicsMapResources(1, &cuda_tex_res));
-    checkCuda(cudaGraphicsSubResourceGetMappedArray(&array, cuda_tex_res, 0, 0));
-
-    dim3 block(32, 32);
-    dim3 grid((width + 31) / 32, (height + 31) / 32);
-    fillKernel << <grid, block >> > (dev_ptr, width, height, xOffset, yOffset);
-    checkCuda(cudaDeviceSynchronize());
-
-    checkCuda(cudaMemcpy2DToArray(array, 0, 0, dev_ptr, width * sizeof(uchar4),
-        width * sizeof(uchar4), height, cudaMemcpyDeviceToDevice));
-    checkCuda(cudaGraphicsUnmapResources(1, &cuda_tex_res));
-}
-
-// --------------------------------------------
-// Shader Sources
-// --------------------------------------------
+// ------------------------------------------------
+// Shaders
+// ------------------------------------------------
 const char* vertexShaderSrc = R"(
 #version 330 core
 layout(location = 0) in vec2 aPos;
@@ -112,9 +168,6 @@ void main() {
 }
 )";
 
-// --------------------------------------------
-// Compile Shader
-// --------------------------------------------
 GLuint createShaderProgram() {
     auto compile = [](const char* src, GLenum type) {
         GLuint shader = glCreateShader(type);
@@ -141,9 +194,9 @@ GLuint createShaderProgram() {
     return program;
 }
 
-// --------------------------------------------
-// Create Quad VAO
-// --------------------------------------------
+// ------------------------------------------------
+// Fullscreen Quad
+// ------------------------------------------------
 GLuint createFullscreenQuad() {
     float vertices[] = {
         -1, -1, 0, 0,
@@ -151,46 +204,40 @@ GLuint createFullscreenQuad() {
          1,  1, 1, 1,
         -1,  1, 0, 1
     };
-
     unsigned int indices[] = { 0, 1, 2, 2, 3, 0 };
     GLuint VAO, VBO, EBO;
     glGenVertexArrays(1, &VAO);
     glGenBuffers(1, &VBO);
     glGenBuffers(1, &EBO);
     glBindVertexArray(VAO);
-
     glBindBuffer(GL_ARRAY_BUFFER, VBO);
     glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
-
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
     glEnableVertexAttribArray(1);
-
     return VAO;
 }
 
-// --------------------------------------------
+// ------------------------------------------------
 // Main Entry
-// --------------------------------------------
+// ------------------------------------------------
 int main() {
     if (!glfwInit()) return -1;
-
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-
-    GLFWwindow* window = glfwCreateWindow(width / 2, height / 2, "CUDA + OpenGL", nullptr, nullptr);
+    GLFWwindow* window = glfwCreateWindow(O1.states.windowWidth, O1.states.windowHeight, "CUDA SDF Raymarch", nullptr, nullptr);
     if (!window) return -1;
     glfwMakeContextCurrent(window);
     glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
-    glfwSwapInterval(0); // VSync off
-
+    glfwSwapInterval(0); // Disable VSync
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) return -1;
 
-    resizeResources(width, height); // Initial texture/cuda alloc
+    glViewport(0, 0, O1.states.windowWidth, O1.states.windowHeight);
+    resizeResources(O1.states.textureWidth, O1.states.textureHeight);
     GLuint program = createShaderProgram();
     GLuint quadVAO = createFullscreenQuad();
 
@@ -199,18 +246,17 @@ int main() {
 
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
-
         frame_count++;
         auto now = std::chrono::high_resolution_clock::now();
         float elapsed = std::chrono::duration<float>(now - last_time).count();
         if (elapsed >= 1.0f) {
-            std::string title = "CUDA OpenGL - " + std::to_string(frame_count) + " FPS";
+            std::string title = "CUDA SDF - " + std::to_string(frame_count) + " FPS";
             glfwSetWindowTitle(window, title.c_str());
             frame_count = 0;
             last_time = now;
         }
 
-        fillTextureWithCUDA((unsigned char)(elapsed * 255.0f), (unsigned char)(elapsed * 255.0f));
+        fillTextureWithCUDA();
 
         glClear(GL_COLOR_BUFFER_BIT);
         glUseProgram(program);
