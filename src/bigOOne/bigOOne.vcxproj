@@ -62,10 +62,15 @@
       <SubSystem>Console</SubSystem>
       <AdditionalDependencies>cudart_static.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>$(SolutionDir)ext\;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <IgnoreAllDefaultLibraries>
+      </IgnoreAllDefaultLibraries>
+      <IgnoreSpecificDefaultLibraries>LIBCMT</IgnoreSpecificDefaultLibraries>
     </Link>
     <CudaCompile>
       <TargetMachinePlatform>64</TargetMachinePlatform>
-      <Include>$(SolutionDir)ext\;%(Include)</Include>
+      <Include>$(SolutionDir)ext\;$(SolutionDir)ext\Eigen;$(SolutionDir)ext\glad;$(SolutionDir)ext\glfw;$(SolutionDir)ext\imgui;$(SolutionDir)ext\implot;$(SolutionDir)ext\stb;%(Include)</Include>
+      <CompileOut>$(SolutionDir)tmp\cuda\$(Configuration)\%(Filename)%(Extension).obj</CompileOut>
+      <AdditionalOptions>-Xcompiler="/utf-8" --expt-relaxed-constexpr %(AdditionalOptions)</AdditionalOptions>
     </CudaCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -84,14 +89,22 @@
       <SubSystem>Console</SubSystem>
       <AdditionalDependencies>cudart_static.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>$(SolutionDir)ext\;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <IgnoreAllDefaultLibraries>
+      </IgnoreAllDefaultLibraries>
+      <IgnoreSpecificDefaultLibraries>LIBCMT</IgnoreSpecificDefaultLibraries>
     </Link>
     <CudaCompile>
       <TargetMachinePlatform>64</TargetMachinePlatform>
-      <Include>$(SolutionDir)ext\;%(Include)</Include>
+      <Include>$(SolutionDir)ext\;$(SolutionDir)ext\Eigen;$(SolutionDir)ext\glad;$(SolutionDir)ext\glfw;$(SolutionDir)ext\imgui;$(SolutionDir)ext\implot;$(SolutionDir)ext\stb;%(Include)</Include>
+      <CompileOut>$(SolutionDir)tmp\cuda\$(Configuration)\%(Filename)%(Extension).obj</CompileOut>
+      <AdditionalOptions>-Xcompiler="/utf-8" --expt-relaxed-constexpr %(AdditionalOptions)</AdditionalOptions>
     </CudaCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
     <CudaCompile Include="main.cu" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="Essential.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
